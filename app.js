@@ -3,6 +3,9 @@ const jsdom = require('jsdom');
 const { JSDOM } = jsdom;
 const argv = require('minimist')(process.argv.slice(2));
 const fs = require('fs');
+const EventEmitter = require('events');
+const mEmitter = new EventEmitter();
+const csv = require('csv');
 
 // check that we have a username and password
 if(!argv.u || !argv.p) {
@@ -11,10 +14,17 @@ if(!argv.u || !argv.p) {
 }
 
 // check that we have a valid csv file
-if(!argv.p || !fs.existsSync(argv.p)) {
+if(!argv.f || !fs.existsSync(argv.f)) {
     console.log('Error: missing source file; check the file path');
     process.exit(0);
 }
+
+// if all is well, load the file
+const rawCsv = fs.readFileSync(argv.f);
+console.log('Successfully loaded CSV file');
+
+// somewhere to store the session cookie
+let sessionCookie = '';
 
 // login to the FIV portal and fetch a session cookie
 request.post('https://www.npcloud.it/fiv/main.aspx?WCI=F_Login&WCE=Login&WCU=01', {
@@ -24,35 +34,94 @@ request.post('https://www.npcloud.it/fiv/main.aspx?WCI=F_Login&WCE=Login&WCU=01'
     }
 }, (err, res) => {
 
-    request.post('https://www.npcloud.it/fiv/Main.aspx?WCI=F_Ricerca&WCE=Invia&WCU=01', {
-        headers: {
-            'Cookie': res.headers['set-cookie']
-        },
-        form: {
-            txtCOG: argv.c,
-            txtNOM: argv.n,
-            txtTESS: argv.t
-        }
-    }, (err, res) => {
-        const dom = new JSDOM(res.body);
+    // usually network errors?
+    if(err) {
+        console.log('Critical error; exiting...');
+        process.exit(1);
+    }
+    // store session cookie in variable
+    else {
+        console.log('Login successful');
+        sessionCookie = res.headers['set-cookie'];
+        // emit event saying we have a session cookie we can use
+        mEmitter.emit('sessionCookieStored');
+    }
+});
 
-        // if a table does not exist it means a match was not found
-        if(!dom.window.document.body.querySelector('tr.listlight > td')) {
-            console.log('Error: no member with these details found');
-            process.exit(0);
-        }
+mEmitter.on('sessionCookieStored', () => {
+    // parse contents of csv data
+    csv.parse(rawCsv, (err, entries) => {
+        // get the length of the list of entries so that, on the last entry, we can write the list back to a csv
+        const numberOfEntries = entries.length;
 
-        const data = [
-            ['name', dom.window.document.body.querySelector('tr.listlight > td').textContent],
-            ['dob', dom.window.document.body.querySelector('tr.listlight > td:nth-child(2)').textContent],
-            ['medCert', dom.window.document.body.querySelector('tr.listlight > td:nth-child(3)').textContent],
-            ['membNo', dom.window.document.body.querySelector('tr.listlight > td:nth-child(4)').textContent],
-            ['lastRenewal', dom.window.document.body.querySelector('tr.listlight > td:nth-child(5)').textContent],
-            ['club', dom.window.document.body.querySelector('tr.listlight > td:nth-child(6)').textContent]
-        ];
+        // array that will contain the final list of entries with the additional data from the FIV portal
+        const entriesFinal = [];
 
-        data.forEach(entry => {
-            console.log(`${entry[0]}: ${entry[1]}`);
+        // recursively check each entry
+        entries.forEach((entry, index) => {
+            getPersonData(entry[0], entry[1], entry[2]).then(data => {
+                // add each field to the entry
+                data.forEach(field => {
+                    // add fields to existing entry
+                    entry.push(field);
+                    
+                });
+                // then add that entire entry to the final list of entries
+                entriesFinal.push(entry);
+                // if we are on the last entry write the file to a new csv
+                if(index === numberOfEntries - 1) {
+                    csv.stringify(entriesFinal, (err, str) => {
+                        console.log(str);
+                    });
+                }
+            });
         });
     });
 })
+
+function getPersonData(firstName, lastName, membNo) {
+    return new Promise((resolve, reject) => {
+        request.post('https://www.npcloud.it/fiv/Main.aspx?WCI=F_Ricerca&WCE=Invia&WCU=01', {
+            headers: {
+                'Cookie': sessionCookie
+            },
+            form: {
+                txtCOG: lastName,
+                txtNOM: firstName,
+                txtTESS: membNo
+            }
+        }, (err, res) => {
+            const dom = new JSDOM(res.body);
+
+            // if a table does not exist it means a match was not found
+            if(!dom.window.document.body.querySelector('tr.listlight > td')) {
+                const data = ['NOT FOUND'];
+                resolve(data);
+                return;
+            }
+
+            /* const data = [
+                ['name', dom.window.document.body.querySelector('tr.listlight > td').textContent],
+                ['dob', dom.window.document.body.querySelector('tr.listlight > td:nth-child(2)').textContent],
+                ['medCert', dom.window.document.body.querySelector('tr.listlight > td:nth-child(3)').textContent],
+                ['membNo', dom.window.document.body.querySelector('tr.listlight > td:nth-child(4)').textContent],
+                ['lastRenewal', dom.window.document.body.querySelector('tr.listlight > td:nth-child(5)').textContent],
+                ['club', dom.window.document.body.querySelector('tr.listlight > td:nth-child(6)').textContent]
+            ]; */
+
+            const data = [
+                // dom.window.document.body.querySelector('tr.listlight > td').textContent,
+                dom.window.document.body.querySelector('tr.listlight > td:nth-child(2)').textContent,
+                dom.window.document.body.querySelector('tr.listlight > td:nth-child(3)').textContent,
+                // dom.window.document.body.querySelector('tr.listlight > td:nth-child(4)').textContent,
+                dom.window.document.body.querySelector('tr.listlight > td:nth-child(5)').textContent,
+                dom.window.document.body.querySelector('tr.listlight > td:nth-child(6)').textContent
+            ];
+
+            /* data.forEach(entry => {
+                console.log(`${entry[0]}: ${entry[1]}`);
+            }); */
+            resolve(data);
+        });
+    });
+}
