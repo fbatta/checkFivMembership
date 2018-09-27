@@ -48,9 +48,15 @@ request.post('https://www.npcloud.it/fiv/main.aspx?WCI=F_Login&WCE=Login&WCU=01'
     }
 });
 
+const getPersonDataPromises = [];
+
 mEmitter.on('sessionCookieStored', () => {
     // parse contents of csv data
     csv.parse(rawCsv, (err, entries) => {
+        if(err) {
+            console.log(`Error: ${err.message}`);
+            process.exit(0);
+        }
         // get the length of the list of entries so that, on the last entry, we can write the list back to a csv
         const numberOfEntries = entries.length;
 
@@ -59,27 +65,33 @@ mEmitter.on('sessionCookieStored', () => {
 
         // recursively check each entry
         entries.forEach((entry, index) => {
-            getPersonData(entry[0], entry[1], entry[2]).then(data => {
-                // add each field to the entry
-                data.forEach(field => {
-                    // add fields to existing entry
-                    entry.push(field);
-                    
-                });
-                // then add that entire entry to the final list of entries
-                entriesFinal.push(entry);
-                // if we are on the last entry write the file to a new csv
-                if(index === numberOfEntries - 1) {
-                    csv.stringify(entriesFinal, (err, str) => {
-                        console.log(str);
-                    });
-                }
+            getPersonDataPromises.push(getPersonData(entry[0], entry[1], entry[2], index));
+
+            /* // add each field to the entry
+            data.forEach(field => {
+                // add fields to existing entry
+                entry.push(field);
+                
             });
+            // then add that entire entry to the final list of entries
+            entriesFinal.push(entry);
+            // if we are on the last entry write the file to a new csv
+            if(index === numberOfEntries - 1) {
+                csv.stringify(entriesFinal, (err, str) => {
+                    console.log(str);
+                });
+            } */
+
+            if(index === numberOfEntries - 1) {
+                Promise.all(getPersonDataPromises).then(value => {
+                    console.log(value);
+                });
+            }
         });
     });
-})
+});
 
-function getPersonData(firstName, lastName, membNo) {
+function getPersonData(firstName, lastName, membNo, index) {
     return new Promise((resolve, reject) => {
         request.post('https://www.npcloud.it/fiv/Main.aspx?WCI=F_Ricerca&WCE=Invia&WCU=01', {
             headers: {
@@ -96,7 +108,10 @@ function getPersonData(firstName, lastName, membNo) {
             // if a table does not exist it means a match was not found
             if(!dom.window.document.body.querySelector('tr.listlight > td')) {
                 const data = ['NOT FOUND'];
-                resolve(data);
+                resolve({
+                    index: index,
+                    data: data
+                });
                 return;
             }
 
@@ -121,7 +136,10 @@ function getPersonData(firstName, lastName, membNo) {
             /* data.forEach(entry => {
                 console.log(`${entry[0]}: ${entry[1]}`);
             }); */
-            resolve(data);
+            resolve({
+                index: index,
+                data: data
+            });
         });
     });
 }
