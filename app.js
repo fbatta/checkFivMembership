@@ -6,6 +6,12 @@ const fs = require('fs');
 const EventEmitter = require('events');
 const mEmitter = new EventEmitter();
 const csv = require('csv');
+const util = require('util');
+const moment = require('moment');
+const { exec } = require('child_process');
+const csvParse = util.promisify(csv.parse);
+const csvStringify = util.promisify(csv.stringify);
+const requestPost = util.promisify(request.post);
 
 // check that we have a username and password
 if(!argv.u || !argv.p) {
@@ -50,13 +56,11 @@ request.post('https://www.npcloud.it/fiv/main.aspx?WCI=F_Login&WCE=Login&WCU=01'
 
 const getPersonDataPromises = [];
 
-mEmitter.on('sessionCookieStored', () => {
-    // parse contents of csv data
-    csv.parse(rawCsv, (err, entries) => {
-        if(err) {
-            console.log(`Error: ${err.message}`);
-            process.exit(0);
-        }
+const onSessionCookieStored = async () => {
+    try {
+        // parse contents of csv data
+        const entries = await csvParse(rawCsv);
+        
         // get the length of the list of entries so that, on the last entry, we can write the list back to a csv
         const numberOfEntries = entries.length;
 
@@ -64,82 +68,103 @@ mEmitter.on('sessionCookieStored', () => {
         const entriesFinal = [];
 
         // recursively check each entry
-        entries.forEach((entry, index) => {
+        entries.forEach(async (entry, index) => {
             getPersonDataPromises.push(getPersonData(entry[0], entry[1], entry[2], index));
-
-            /* // add each field to the entry
-            data.forEach(field => {
-                // add fields to existing entry
-                entry.push(field);
+            if(index === numberOfEntries - 1) {
+                // wait until all promises are resolved and then combine entries and results
+                const results = await Promise.all(getPersonDataPromises);
+                combineEntriesAndResults(entries, results);
                 
-            });
-            // then add that entire entry to the final list of entries
-            entriesFinal.push(entry);
-            // if we are on the last entry write the file to a new csv
-            if(index === numberOfEntries - 1) {
-                csv.stringify(entriesFinal, (err, str) => {
-                    console.log(str);
-                });
-            } */
+                // use the entries array (which is now updated with the results data) and analyze data
+                analyzeData(entries);
 
-            if(index === numberOfEntries - 1) {
-                Promise.all(getPersonDataPromises).then(value => {
-                    console.log(value);
-                });
+                // write data to new csv file
+                const headerString = 'firstName,lastName,membNo,dob,medCert,renewalDate,club,isCurrent,isMedCertValid';
+                const csvString = await csvStringify(entries);
+                fs.writeFileSync('./results.csv', `${headerString}\n${csvString}`);
+
+                // open file in excel
+                exec('start excel ./results.csv');
             }
+        });
+    }
+    catch(err) {
+        console.log(`Error: ${err.message}`);
+        process.exit(1);
+    }
+}
+
+mEmitter.on('sessionCookieStored', onSessionCookieStored);
+
+async function getPersonData(firstName, lastName, membNo, index) {
+    const res = await requestPost({
+        url: 'https://www.npcloud.it/fiv/Main.aspx?WCI=F_Ricerca&WCE=Invia&WCU=01',
+        headers: {
+            'Cookie': sessionCookie
+        },
+        form: {
+            txtCOG: lastName,
+            txtNOM: firstName,
+            txtTESS: membNo
+        }
+    });
+
+    const dom = new JSDOM(res.body);
+
+    // if a table does not exist it means a match was not found
+    if(!dom.window.document.body.querySelector('tr.listlight > td')) {
+        const data = ['NOT FOUND'];
+        return {
+            index: index,
+            data: data
+        };
+    }
+
+    const data = [
+        // dom.window.document.body.querySelector('tr.listlight > td').textContent,
+        dom.window.document.body.querySelector('tr.listlight > td:nth-child(2)').textContent,
+        dom.window.document.body.querySelector('tr.listlight > td:nth-child(3)').textContent,
+        // dom.window.document.body.querySelector('tr.listlight > td:nth-child(4)').textContent,
+        dom.window.document.body.querySelector('tr.listlight > td:nth-child(5)').textContent,
+        dom.window.document.body.querySelector('tr.listlight > td:nth-child(6)').textContent
+    ];
+
+    return {
+        index: index,
+        data: data
+    };
+}
+
+function combineEntriesAndResults(entries, results) {
+    results.forEach(result => {
+        result.data.forEach(data => {
+            entries[result.index].push(data);
         });
     });
-});
+}
 
-function getPersonData(firstName, lastName, membNo, index) {
-    return new Promise((resolve, reject) => {
-        request.post('https://www.npcloud.it/fiv/Main.aspx?WCI=F_Ricerca&WCE=Invia&WCU=01', {
-            headers: {
-                'Cookie': sessionCookie
-            },
-            form: {
-                txtCOG: lastName,
-                txtNOM: firstName,
-                txtTESS: membNo
+function analyzeData(entries) {
+    // get date
+    const currentDate = moment();
+    const currentYear = parseInt(currentDate.format('YYYY'));
+
+    entries.forEach(entry => {
+
+        // if the array length is just 4 it means that data was not found so we can skip the checks
+        if (entry.length !== 4) {
+            // check renewal is current
+            const renewalYear = parseInt(entry[5]);
+            if(renewalYear < currentYear) { entry.push('NOT CURRENT'); }
+            else { entry.push('CURRENT'); }
+
+            // check if medical certificate is current
+            if(entry[4] === ' - ') { entry.push('NO MED CERT'); }
+            else {
+                const medCertExpiryDateString = entry[4].split(' ').pop();
+                const medCertExpiryDate = moment(medCertExpiryDateString, 'DD/MM/YY');
+                if(medCertExpiryDate.isBefore(currentDate)) { entry.push('MED CERT EXPIRED'); }
+                else { entry.push('MED CERT VALID'); }
             }
-        }, (err, res) => {
-            const dom = new JSDOM(res.body);
-
-            // if a table does not exist it means a match was not found
-            if(!dom.window.document.body.querySelector('tr.listlight > td')) {
-                const data = ['NOT FOUND'];
-                resolve({
-                    index: index,
-                    data: data
-                });
-                return;
-            }
-
-            /* const data = [
-                ['name', dom.window.document.body.querySelector('tr.listlight > td').textContent],
-                ['dob', dom.window.document.body.querySelector('tr.listlight > td:nth-child(2)').textContent],
-                ['medCert', dom.window.document.body.querySelector('tr.listlight > td:nth-child(3)').textContent],
-                ['membNo', dom.window.document.body.querySelector('tr.listlight > td:nth-child(4)').textContent],
-                ['lastRenewal', dom.window.document.body.querySelector('tr.listlight > td:nth-child(5)').textContent],
-                ['club', dom.window.document.body.querySelector('tr.listlight > td:nth-child(6)').textContent]
-            ]; */
-
-            const data = [
-                // dom.window.document.body.querySelector('tr.listlight > td').textContent,
-                dom.window.document.body.querySelector('tr.listlight > td:nth-child(2)').textContent,
-                dom.window.document.body.querySelector('tr.listlight > td:nth-child(3)').textContent,
-                // dom.window.document.body.querySelector('tr.listlight > td:nth-child(4)').textContent,
-                dom.window.document.body.querySelector('tr.listlight > td:nth-child(5)').textContent,
-                dom.window.document.body.querySelector('tr.listlight > td:nth-child(6)').textContent
-            ];
-
-            /* data.forEach(entry => {
-                console.log(`${entry[0]}: ${entry[1]}`);
-            }); */
-            resolve({
-                index: index,
-                data: data
-            });
-        });
+        }
     });
 }
