@@ -6,12 +6,12 @@ const fs = require('fs');
 const EventEmitter = require('events');
 const mEmitter = new EventEmitter();
 const csv = require('csv');
-const util = require('util');
+const { promisify } = require('util');
 const moment = require('moment');
 const { exec } = require('child_process');
-const csvParse = util.promisify(csv.parse);
-const csvStringify = util.promisify(csv.stringify);
-const requestPost = util.promisify(request.post);
+const csvParse = promisify(csv.parse);
+const csvStringify = promisify(csv.stringify);
+const requestPost = promisify(request.post);
 
 // check that we have a username and password
 if(!argv.u || !argv.p) {
@@ -33,25 +33,31 @@ console.log('Successfully loaded CSV file');
 let sessionCookie = '';
 
 // login to the FIV portal and fetch a session cookie
-request.post('https://www.npcloud.it/fiv/main.aspx?WCI=F_Login&WCE=Login&WCU=01', {
+requestPost({
+    url: 'https://www.npcloud.it/fiv/main.aspx?WCI=F_Login&WCE=Login&WCU=01',
     form: {
         txtUTE: argv.u,
         txtPWD: argv.p
     }
-}, (err, res) => {
-
-    // usually network errors?
-    if(err) {
-        console.log('Critical error; exiting...');
-        process.exit(1);
+}).then(res => {
+    // check if login was successful
+    if(res.body.includes('PASSWORD NON VALIDA')) {
+        console.log('Error: login failed; check your username and password');
+        process.exit(0);
     }
-    // store session cookie in variable
+    // all was well
     else {
         console.log('Login successful');
+
+        // store session cookie in variable
         sessionCookie = res.headers['set-cookie'];
         // emit event saying we have a session cookie we can use
         mEmitter.emit('sessionCookieStored');
     }
+}).catch(err => {
+    // usually network errors?
+    console.log('Critical error; exiting...');
+    process.exit(1);
 });
 
 const getPersonDataPromises = [];
@@ -67,9 +73,13 @@ const onSessionCookieStored = async () => {
         // array that will contain the final list of entries with the additional data from the FIV portal
         const entriesFinal = [];
 
+        console.log('Retrieving information from the FIV portal...');
+
         // recursively check each entry
         entries.forEach(async (entry, index) => {
             getPersonDataPromises.push(getPersonData(entry[0], entry[1], entry[2], index));
+
+            // on the last entry...
             if(index === numberOfEntries - 1) {
                 // wait until all promises are resolved and then combine entries and results
                 const results = await Promise.all(getPersonDataPromises);
@@ -84,6 +94,7 @@ const onSessionCookieStored = async () => {
                 fs.writeFileSync('./results.csv', `${headerString}\n${csvString}`);
 
                 // open file in excel
+                console.log('All done. Opening excel...');
                 exec('start excel ./results.csv');
             }
         });
@@ -160,6 +171,7 @@ function analyzeData(entries) {
             // check if medical certificate is current
             if(entry[4] === ' - ') { entry.push('NO MED CERT'); }
             else {
+                // get the medical certificate expiry date
                 const medCertExpiryDateString = entry[4].split(' ').pop();
                 const medCertExpiryDate = moment(medCertExpiryDateString, 'DD/MM/YY');
                 if(medCertExpiryDate.isBefore(currentDate)) { entry.push('MED CERT EXPIRED'); }
